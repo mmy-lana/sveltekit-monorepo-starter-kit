@@ -1,0 +1,10 @@
+node_modules
+.svelte-kit
+build
+dist
+.env
+.env.*
+!.env.example
+.DS_Store
+pnpm-debug.log*
+repomix-output.xml
