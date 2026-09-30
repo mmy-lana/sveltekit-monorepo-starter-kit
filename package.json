@@ -7,6 +7,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
+    "verify": "node scripts/verify.mjs",
     "check": "svelte-kit sync && svelte-check --tsgo --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
@@ -15,6 +16,7 @@
     "@sveltejs/vite-plugin-svelte": "latest",
     "@tailwindcss/vite": "latest",
     "@typescript/native": "npm:typescript@latest",
+    "playwright": "latest",
     "svelte": "latest",
     "svelte-check": "latest",
     "tailwindcss": "latest",

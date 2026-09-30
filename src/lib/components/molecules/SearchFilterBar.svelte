@@ -11,6 +11,7 @@
     <Input
       bind:value={monorepoStore.searchQuery}
       placeholder="Search packages, tags or dependencies..."
+      ariaLabel="Search workspace packages"
       onclear={() => (monorepoStore.searchQuery = '')}
     />
   </div>

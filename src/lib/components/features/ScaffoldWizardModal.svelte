@@ -42,9 +42,14 @@
     }
 
     const pkg = generateScaffoldPackage(name, type, description, version);
-    monorepoStore.addPackage(pkg);
+    const result = monorepoStore.addPackage(pkg);
+    if (!result.success) {
+      errorMessage = result.error ?? 'Failed to create package.';
+      return;
+    }
     name = '';
     description = '';
+    version = '0.1.0';
     onclose();
   }
 </script>
@@ -78,7 +83,10 @@
     </div>
 
     {#if errorMessage}
-      <div class="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-mono">
+      <div
+        data-testid="wizard-error"
+        class="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-mono"
+      >
         {errorMessage}
       </div>
     {/if}

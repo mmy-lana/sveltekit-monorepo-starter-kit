@@ -36,13 +36,45 @@ export function buildGraph(packages: WorkspacePackage[]): DependencyGraphData {
       id: pkg.id,
       name: pkg.name,
       type: pkg.type,
-      depth: 0,
+      depth: computeDepth(pkg.id, packageMap),
       dependenciesCount: pkg.dependencies.filter((d) => d.isInternal && packageMap.has(d.id)).length,
       dependentsCount: dependentsCountMap.get(pkg.id) ?? 0
     };
   });
 
   return { nodes, links };
+}
+
+/**
+ * Longest-path depth: 0 for a workspace with no internal dependencies, and
+ * `1 + max(depth(dependency))` otherwise. Memoised and cycle-guarded so a
+ * malformed graph degrades to depth 0 instead of recursing forever.
+ */
+function computeDepth(rootId: string, packageMap: Map<string, WorkspacePackage>): number {
+  const memo = new Map<string, number>();
+  const visiting = new Set<string>();
+
+  const walk = (id: string): number => {
+    const cached = memo.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) return 0;
+
+    const pkg = packageMap.get(id);
+    if (!pkg) return 0;
+
+    visiting.add(id);
+    let depth = 0;
+    for (const dep of pkg.dependencies) {
+      if (!dep.isInternal || !packageMap.has(dep.id)) continue;
+      depth = Math.max(depth, walk(dep.id) + 1);
+    }
+    visiting.delete(id);
+
+    memo.set(id, depth);
+    return depth;
+  };
+
+  return walk(rootId);
 }
 
 export function wouldCreateCycle(
@@ -158,7 +190,7 @@ export function getTopologicalOrder(packages: WorkspacePackage[]): {
     return {
       executionBatches: [],
       hasCycle: true,
-      cyclePath: ['Circular dependency detected in workspace graph']
+      cyclePath: findCyclePath(packages)
     };
   }
 
@@ -166,4 +198,56 @@ export function getTopologicalOrder(packages: WorkspacePackage[]): {
     executionBatches: batches,
     hasCycle: false
   };
+}
+
+/**
+ * Produces a concrete diagnostic path for the first cycle found, formatted as
+ * human-readable package names (e.g. `pkg-a -> pkg-b -> pkg-a`). Returns an
+ * empty array when no cycle exists.
+ */
+function findCyclePath(packages: WorkspacePackage[]): string[] {
+  const nameById = new Map(packages.map((p) => [p.id, p.name]));
+
+  const adjacency = new Map<string, string[]>();
+  for (const pkg of packages) {
+    adjacency.set(
+      pkg.id,
+      pkg.dependencies.filter((d) => d.isInternal).map((d) => d.id)
+    );
+  }
+
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+
+  const dfs = (node: string): string[] | null => {
+    visited.add(node);
+    stack.push(node);
+    onStack.add(node);
+
+    for (const next of adjacency.get(node) ?? []) {
+      if (!adjacency.has(next)) continue;
+      if (onStack.has(next)) {
+        // Unwind back to where `next` first entered the stack.
+        const start = stack.indexOf(next);
+        return [...stack.slice(start), next];
+      }
+      if (!visited.has(next)) {
+        const found = dfs(next);
+        if (found) return found;
+      }
+    }
+
+    stack.pop();
+    onStack.delete(node);
+    return null;
+  };
+
+  for (const pkg of packages) {
+    if (visited.has(pkg.id)) continue;
+    const cycle = dfs(pkg.id);
+    if (cycle) return cycle.map((id) => nameById.get(id) ?? id);
+  }
+
+  return [];
 }

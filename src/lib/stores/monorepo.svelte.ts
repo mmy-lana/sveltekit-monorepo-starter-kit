@@ -1,6 +1,27 @@
-import type { DependencyKind, MonorepoStorageState, PackageType, TaskStatus, WorkspacePackage } from '$lib/types';
-import { flushStorage, getInitialSeedData, loadState, persist, saveStateImmediate } from '$lib/storage/localStorageManager';
+import type { DependencyKind, MonorepoStorageState, PackageType, PipelineRun, TaskStatus, WorkspacePackage } from '$lib/types';
+import {
+  flushStorage,
+  getInitialSeedData,
+  loadState,
+  persist,
+  saveStateImmediate,
+  validateStorageSnapshot
+} from '$lib/storage/localStorageManager';
 import { wouldCreateCycle } from '$lib/utils/dag';
+import { validatePackageName, validateSemVer } from '$lib/utils/scaffold';
+
+/**
+ * Returns `activeWorkspaceId` only when it still resolves against `registry`.
+ * Any dangling or missing reference collapses to `null` so downstream readers
+ * (`activePackage`, the detail drawer) never dereference a stale id.
+ */
+function resolveActiveWorkspace(
+  activeWorkspaceId: string | null,
+  registry: WorkspacePackage[]
+): string | null {
+  if (!activeWorkspaceId) return null;
+  return registry.some((pkg) => pkg.id === activeWorkspaceId) ? activeWorkspaceId : null;
+}
 
 const initial = loadState();
 
@@ -10,13 +31,25 @@ let searchQuery = $state<string>(initial.persistedFilters.searchQuery || '');
 let selectedTypes = $state<PackageType[]>(initial.persistedFilters.types || []);
 let selectedStatus = $state<TaskStatus | 'all'>(initial.persistedFilters.statusFilter || 'all');
 let openModalId = $state<string | null>(null);
+/**
+ * Tracked separately from `activeWorkspaceId`: a restored snapshot may name an
+ * active workspace, but the inspector drawer must still start closed so a page
+ * load never greets the user with a panel covering the dashboard.
+ */
+let drawerOpen = $state(false);
+/**
+ * Owned here rather than in `pipeline.svelte.ts` so the snapshot stays in one
+ * place. The pipeline store pushes its runs in via `syncPipelineRuns`, which
+ * keeps the import direction one-way (pipeline -> monorepo).
+ */
+let pipelineRuns = $state<PipelineRun[]>(initial.pipelineRuns ?? []);
 
 function getSnapshot(): MonorepoStorageState {
   return {
     version: initial.version,
     activeWorkspaceId,
     packages,
-    pipelineRuns: initial.pipelineRuns,
+    pipelineRuns: $state.snapshot(pipelineRuns),
     scaffoldBlueprints: initial.scaffoldBlueprints,
     persistedFilters: {
       searchQuery,
@@ -67,9 +100,30 @@ export const monorepoStore = {
   get openModalId() {
     return openModalId;
   },
+  get drawerOpen() {
+    return drawerOpen;
+  },
+  get pipelineRuns() {
+    return pipelineRuns;
+  },
 
+  /**
+   * Global stacking rule: a modal always wins over the inspector drawer, so
+   * opening one force-closes the other rather than stacking two overlays.
+   */
   setOpenModal(id: string | null) {
     openModalId = id;
+    if (id !== null) drawerOpen = false;
+  },
+
+  /**
+   * Called by `pipeline.svelte.ts` whenever its run list changes so the shared
+   * snapshot picks the history up. Never call this from the pipeline store with
+   * a stale list.
+   */
+  syncPipelineRuns(nextRuns: PipelineRun[]) {
+    pipelineRuns = nextRuns.map((run) => $state.snapshot(run));
+    sync();
   },
 
   toggleTypeFilter(type: PackageType) {
@@ -81,22 +135,49 @@ export const monorepoStore = {
     sync();
   },
 
+  /**
+   * Selects a workspace and opens the inspector. Passing `null` closes the
+   * drawer without discarding the selection.
+   */
   setActiveWorkspace(id: string | null) {
+    if (id === null) {
+      drawerOpen = false;
+      return;
+    }
     activeWorkspaceId = id;
+    drawerOpen = true;
     sync();
   },
 
+  closeDrawer() {
+    drawerOpen = false;
+  },
+
   filteredPackages(): WorkspacePackage[] {
+    const runByWorkspace = new Map<string, TaskStatus>();
+    for (const run of pipelineRuns) {
+      for (const step of run.steps) {
+        if (!runByWorkspace.has(step.workspaceId)) {
+          runByWorkspace.set(step.workspaceId, step.status);
+        }
+      }
+    }
+
+    const query = searchQuery.trim().toLowerCase();
+
     return packages.filter((pkg) => {
       const matchSearch =
-        !searchQuery ||
-        pkg.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        pkg.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        pkg.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()));
+        !query ||
+        pkg.name.toLowerCase().includes(query) ||
+        pkg.description.toLowerCase().includes(query) ||
+        pkg.tags.some((t) => t.toLowerCase().includes(query));
 
       const matchType = selectedTypes.length === 0 || selectedTypes.includes(pkg.type);
 
-      return matchSearch && matchType;
+      const matchStatus =
+        selectedStatus === 'all' || runByWorkspace.get(pkg.id) === selectedStatus;
+
+      return matchSearch && matchType && matchStatus;
     });
   },
 
@@ -132,7 +213,7 @@ export const monorepoStore = {
       };
     }
 
-    packages = packages
+    const remaining = packages
       .filter((p) => p.id !== id)
       .map((p) => ({
         ...p,
@@ -140,9 +221,11 @@ export const monorepoStore = {
         updatedAt: new Date().toISOString()
       }));
 
-    if (activeWorkspaceId === id) {
-      activeWorkspaceId = null;
-    }
+    packages = remaining;
+
+    // Re-resolve the active workspace against the surviving registry so a
+    // deletion can never leave a dangling id behind.
+    activeWorkspaceId = resolveActiveWorkspace(activeWorkspaceId, remaining);
 
     sync(true);
     return { success: true };
@@ -162,6 +245,14 @@ export const monorepoStore = {
 
     if (fromPkg.dependencies.some((d) => d.id === toId)) {
       return { success: false, error: 'Dependency is already linked.' };
+    }
+
+    const versionCheck = validateSemVer(toPkg.version);
+    if (!versionCheck.valid) {
+      return {
+        success: false,
+        error: `Cannot link ${toPkg.name}: ${versionCheck.error ?? 'target version is not valid SemVer.'}`
+      };
     }
 
     if (wouldCreateCycle(packages, { from: fromId, to: toId })) {
@@ -205,23 +296,68 @@ export const monorepoStore = {
     sync();
   },
 
+  updateScript(packageId: string, scriptId: string, patch: { name?: string; command?: string }): { success: boolean; error?: string } {
+    const target = packages.find((p) => p.id === packageId);
+    if (!target) return { success: false, error: 'Package not found.' };
+    if (!target.scripts.some((s) => s.id === scriptId)) {
+      return { success: false, error: 'Script not found.' };
+    }
+
+    packages = packages.map((p) => {
+      if (p.id !== packageId) return p;
+      return {
+        ...p,
+        scripts: p.scripts.map((s) => (s.id === scriptId ? { ...s, ...patch } : s)),
+        updatedAt: new Date().toISOString()
+      };
+    });
+    sync();
+    return { success: true };
+  },
+
+  updatePackage(packageId: string, patch: Partial<Pick<WorkspacePackage, 'name' | 'description' | 'type' | 'tags'>>): { success: boolean; error?: string } {
+    if (!packages.some((p) => p.id === packageId)) {
+      return { success: false, error: 'Package not found.' };
+    }
+
+    if (patch.name !== undefined) {
+      const check = validatePackageName(patch.name);
+      if (!check.valid) {
+        return { success: false, error: check.error ?? 'Invalid package name.' };
+      }
+    }
+
+    packages = packages.map((p) =>
+      p.id === packageId ? { ...p, ...patch, updatedAt: new Date().toISOString() } : p
+    );
+    sync();
+    return { success: true };
+  },
+
   resetToSeed() {
     const seed = getInitialSeedData();
     packages = seed.packages;
-    activeWorkspaceId = seed.activeWorkspaceId;
+    pipelineRuns = [];
+    activeWorkspaceId = resolveActiveWorkspace(seed.activeWorkspaceId, seed.packages);
     searchQuery = '';
     selectedTypes = [];
     selectedStatus = 'all';
+    openModalId = null;
+    drawerOpen = false;
     saveStateImmediate(seed);
   },
 
   importSnapshot(state: MonorepoStorageState): { success: boolean; error?: string } {
-    if (!state.packages || !Array.isArray(state.packages)) {
+    const validated = validateStorageSnapshot(state);
+    if (!validated) {
       return { success: false, error: 'Invalid state snapshot.' };
     }
-    packages = state.packages;
-    activeWorkspaceId = state.activeWorkspaceId;
-    saveStateImmediate(state);
+    packages = validated.packages;
+    activeWorkspaceId = resolveActiveWorkspace(validated.activeWorkspaceId, validated.packages);
+    saveStateImmediate({
+      ...validated,
+      activeWorkspaceId
+    });
     return { success: true };
   },
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { monorepoStore } from '$lib/stores/monorepo.svelte';
+  import { pipelineStore } from '$lib/stores/pipeline.svelte';
   import Button from '$lib/components/ui/Button.svelte';
 
   let fileInput: HTMLInputElement;
@@ -28,7 +29,12 @@
     reader.onload = (event) => {
       try {
         const json = JSON.parse(event.target?.result as string);
-        monorepoStore.importSnapshot(json);
+        const result = monorepoStore.importSnapshot(json);
+        if (!result.success) {
+          alert(result.error ?? 'Snapshot could not be imported.');
+        } else {
+          pipelineStore.resetRuns();
+        }
       } catch {
         alert('Invalid JSON file format.');
       }
@@ -40,6 +46,7 @@
   function handleReset() {
     if (confirm('Reset monorepo to default seed state? All customizations will be reset.')) {
       monorepoStore.resetToSeed();
+      pipelineStore.resetRuns();
     }
   }
 </script>

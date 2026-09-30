@@ -43,10 +43,10 @@
     {#if displayedLogs.length === 0}
       <div class="text-neutral-600 italic">No output logs present.</div>
     {:else}
-      {#each displayedLogs as log, i}
+      {#each displayedLogs as log, i (i)}
         <div class="flex items-start space-x-3 leading-relaxed whitespace-pre font-mono">
           <span class="text-neutral-600 select-none text-right w-6 shrink-0">{i + 1}</span>
-          <span class="break-all">{log}</span>
+          <span class="break-all" data-testid="terminal-line">{log}</span>
         </div>
       {/each}
     {/if}

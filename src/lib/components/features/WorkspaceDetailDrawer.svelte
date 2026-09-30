@@ -6,7 +6,7 @@
   import DependencyListRow from '$lib/components/molecules/DependencyListRow.svelte';
   import Select from '$lib/components/ui/Select.svelte';
 
-  let activePkg = $derived(monorepoStore.activePackage);
+  let activePkg = $derived(monorepoStore.drawerOpen ? monorepoStore.activePackage : undefined);
   let availableLinkTargets = $derived.by(() => {
     if (!activePkg) return [];
     return monorepoStore.packages
@@ -32,23 +32,34 @@
     if (!activePkg) return;
     if (confirm(`Are you sure you want to delete ${activePkg.name}?`)) {
       monorepoStore.removePackage(activePkg.id, true);
+      monorepoStore.closeDrawer();
     }
   }
 </script>
 
 {#if activePkg}
   <div
-    class="fixed inset-0 z-40 lg:hidden bg-black/60 backdrop-blur-xs"
+    class="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs"
     role="button"
     tabindex="0"
-    onclick={() => monorepoStore.setActiveWorkspace(null)}
+    aria-label="Close workspace details"
+    onclick={() => monorepoStore.closeDrawer()}
     onkeydown={(e) => {
-      if (e.key === 'Escape') monorepoStore.setActiveWorkspace(null);
+      if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+        monorepoStore.closeDrawer();
+      }
     }}
   ></div>
 
-  <aside
-    class="fixed top-0 right-0 z-50 h-screen w-full sm:w-[460px] bg-neutral-900 border-l border-neutral-800 p-6 flex flex-col justify-between overflow-y-auto shadow-2xl transition-transform"
+  <!-- Bottom sheet below 1024px, right-docked drawer from 1024px up. -->
+  <div
+    role="dialog"
+    aria-modal="true"
+    aria-label="Workspace details for {activePkg.name}"
+    data-testid="workspace-drawer"
+    class="fixed z-50 bg-neutral-900 border-neutral-800 p-5 sm:p-6 flex flex-col overflow-y-auto shadow-2xl
+           inset-x-0 bottom-0 max-h-[88vh] rounded-t-2xl border-t
+           lg:inset-y-0 lg:left-auto lg:right-0 lg:w-[460px] lg:max-h-none lg:h-screen lg:rounded-none lg:rounded-l-2xl lg:border-t-0 lg:border-l"
   >
     <div class="space-y-6">
       <div class="flex items-start justify-between border-b border-neutral-800 pb-4">
@@ -61,7 +72,7 @@
         </div>
         <button
           type="button"
-          onclick={() => monorepoStore.setActiveWorkspace(null)}
+          onclick={() => monorepoStore.closeDrawer()}
           class="text-neutral-400 hover:text-white p-2 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg"
           aria-label="Close details"
         >
@@ -141,5 +152,5 @@
         Delete Workspace
       </Button>
     </div>
-  </aside>
+  </div>
 {/if}

@@ -27,8 +27,8 @@
     </Button>
   </div>
 {:else}
-  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-    {#each list as pkg}
+  <div data-testid="workspace-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 min-w-0">
+    {#each list as pkg (pkg.id)}
       <Card
         title={pkg.name}
         subtitle={`${pkg.path} (v${pkg.version})`}
@@ -38,15 +38,15 @@
           <Badge type={pkg.type} />
         {/snippet}
 
-        <div class="space-y-3 mt-1">
-          <p class="text-xs text-neutral-400 line-clamp-2 leading-relaxed">
+        <div class="space-y-3 mt-1 min-w-0">
+          <p class="text-xs text-neutral-400 line-clamp-2 leading-relaxed break-words">
             {pkg.description || 'No description available'}
           </p>
 
-          <div class="flex items-center justify-between text-[11px] font-mono pt-3 border-t border-neutral-800/50">
+          <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono pt-3 border-t border-neutral-800/50">
             <span class="text-neutral-500">Deps: {pkg.dependencies.length}</span>
             <span class="text-neutral-500">Scripts: {pkg.scripts.length}</span>
-            <span class="text-blue-400">Configure →</span>
+            <span class="text-blue-400">Configure &rarr;</span>
           </div>
         </div>
       </Card>

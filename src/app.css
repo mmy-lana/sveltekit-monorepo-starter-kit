@@ -20,4 +20,38 @@ body {
   background-color: var(--color-hud-bg);
   color: #f3f4f6;
   min-height: 100vh;
+  /* Guard against a stray wide child forcing a horizontal scrollbar on the
+     document at narrow (360-430px) viewports. */
+  overflow-x: hidden;
+}
+
+@layer components {
+  /*
+   * Edge-fade mask for horizontally scrollable strips (nav rails, tab rows).
+   * The gradient sits behind the content and fades the clipped edges so it is
+   * visually obvious that more items exist off-screen.
+   */
+  .scroll-mask-x {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 12px,
+      #000 calc(100% - 12px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 12px,
+      #000 calc(100% - 12px),
+      transparent 100%
+    );
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .scroll-mask-x::-webkit-scrollbar {
+    display: none;
+  }
 }

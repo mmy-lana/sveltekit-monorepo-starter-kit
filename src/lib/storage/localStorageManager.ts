@@ -1,4 +1,16 @@
-import type { MonorepoStorageState, WorkspacePackage } from '$lib/types';
+import type {
+  DependencyKind,
+  MonorepoStorageState,
+  PackageType,
+  PipelineRun,
+  ScaffoldBlueprint,
+  TaskStatus,
+  WorkspaceDependency,
+  WorkspaceFilterState,
+  WorkspacePackage,
+  WorkspaceScript
+} from '$lib/types';
+import { validatePackageName } from '$lib/utils/scaffold';
 
 export const STORAGE_KEY = 'sveltekit_monorepo_platform_v1';
 export const STORAGE_VERSION = 1;
@@ -163,29 +175,265 @@ export function getInitialSeedData(): MonorepoStorageState {
 let pendingState: MonorepoStorageState | null = null;
 let debounceTimeout: ReturnType<typeof setTimeout> | null = null;
 
+/** Keys that can be used to poison an object's prototype chain. */
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Recursively removes prototype-pollution vectors from an arbitrary parsed JSON
+ * value. `JSON.parse` itself does not mutate the prototype chain, but it does
+ * produce *own* properties named `__proto__`, which become live pollution
+ * vectors the moment the object is spread, merged or re-serialised downstream.
+ */
+function stripPollution(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stripPollution(entry));
+  }
+  if (isRecord(value)) {
+    const clean: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (FORBIDDEN_KEYS.has(key)) continue;
+      clean[key] = stripPollution(entry);
+    }
+    return clean;
+  }
+  return value;
+}
+
+const PACKAGE_TYPES: readonly PackageType[] = ['app', 'lib', 'tool', 'config'];
+const DEPENDENCY_KINDS: readonly DependencyKind[] = [
+  'dependencies',
+  'devDependencies',
+  'peerDependencies'
+];
+const TASK_STATUSES: readonly TaskStatus[] = [
+  'idle',
+  'queued',
+  'running',
+  'success',
+  'failure',
+  'cached'
+];
+
+function isPackageType(value: unknown): value is PackageType {
+  return typeof value === 'string' && (PACKAGE_TYPES as readonly string[]).includes(value);
+}
+
+function isDependencyKind(value: unknown): value is DependencyKind {
+  return typeof value === 'string' && (DEPENDENCY_KINDS as readonly string[]).includes(value);
+}
+
+function isTaskStatus(value: unknown): value is TaskStatus {
+  return typeof value === 'string' && (TASK_STATUSES as readonly string[]).includes(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+function isWorkspaceDependency(value: unknown): value is WorkspaceDependency {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.name) &&
+    typeof value.version === 'string' &&
+    isDependencyKind(value.kind) &&
+    typeof value.isInternal === 'boolean' &&
+    (value.resolvedPath === undefined || typeof value.resolvedPath === 'string') &&
+    (value.env === undefined || isStringRecord(value.env))
+  );
+}
+
+function isWorkspaceScript(value: unknown): value is WorkspaceScript {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.name) &&
+    typeof value.command === 'string' &&
+    (value.env === undefined || isStringRecord(value.env))
+  );
+}
+
+function isWorkspacePackage(value: unknown): value is WorkspacePackage {
+  if (!isRecord(value)) return false;
+  if (
+    !(
+      isNonEmptyString(value.id) &&
+      isNonEmptyString(value.name) &&
+      isNonEmptyString(value.slug) &&
+      typeof value.version === 'string' &&
+      isPackageType(value.type) &&
+      typeof value.path === 'string' &&
+      typeof value.description === 'string' &&
+      Array.isArray(value.dependencies) &&
+      value.dependencies.every(isWorkspaceDependency) &&
+      Array.isArray(value.scripts) &&
+      value.scripts.every(isWorkspaceScript) &&
+      Array.isArray(value.tags) &&
+      value.tags.every((tag): tag is string => typeof tag === 'string') &&
+      typeof value.createdAt === 'string' &&
+      typeof value.updatedAt === 'string'
+    )
+  ) {
+    return false;
+  }
+
+  // Shape validation alone would happily accept a well-formed package whose
+  // name or path is a traversal sequence. Imported snapshots bypass the
+  // scaffolder's own sanitising, so it is re-checked here.
+  if (!validatePackageName(value.name).valid) return false;
+  if (!isSafePathSegment(value.slug)) return false;
+  if (!isSafePath(value.path)) return false;
+
+  return true;
+}
+
+/** A single path segment: no separators and no relative markers. */
+function isSafePathSegment(segment: string): boolean {
+  if (!segment || segment.length === 0) return false;
+  if (segment === '.' || segment === '..' || segment === '~') return false;
+  if (segment.includes('/') || segment.includes('\\')) return false;
+  if (segment.toLowerCase().includes('%2e')) return false;
+  return true;
+}
+
+/** A relative POSIX path made only of safe segments. */
+function isSafePath(path: string): boolean {
+  if (!path) return false;
+  if (path.startsWith('/') || path.startsWith('\\')) return false;
+  if (path.includes('\\')) return false;
+  if (/^[a-zA-Z]:/.test(path)) return false;
+  return path.split('/').every((segment) => isSafePathSegment(segment));
+}
+
+function isPipelineStep(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.workspaceId) &&
+    typeof value.scriptName === 'string' &&
+    isTaskStatus(value.status) &&
+    (value.exitCode === null || typeof value.exitCode === 'number') &&
+    typeof value.durationMs === 'number' &&
+    Array.isArray(value.stdout) &&
+    value.stdout.every((line): line is string => typeof line === 'string') &&
+    Array.isArray(value.stderr) &&
+    value.stderr.every((line): line is string => typeof line === 'string') &&
+    typeof value.cached === 'boolean' &&
+    (value.startedAt === null || typeof value.startedAt === 'string') &&
+    (value.completedAt === null || typeof value.completedAt === 'string')
+  );
+}
+
+function isPipelineRun(value: unknown): value is PipelineRun {
+  if (!isRecord(value)) return false;
+  const triggers = ['manual', 'watch', 'ci'];
+  return (
+    isNonEmptyString(value.id) &&
+    typeof value.trigger === 'string' &&
+    (triggers as readonly string[]).includes(value.trigger) &&
+    typeof value.command === 'string' &&
+    Array.isArray(value.scope) &&
+    value.scope.every((entry): entry is string => typeof entry === 'string') &&
+    isTaskStatus(value.status) &&
+    typeof value.totalDurationMs === 'number' &&
+    Array.isArray(value.steps) &&
+    value.steps.every(isPipelineStep) &&
+    typeof value.createdAt === 'string' &&
+    (value.completedAt === null || typeof value.completedAt === 'string')
+  );
+}
+
+function isScaffoldBlueprintFile(value: unknown): boolean {
+  return isRecord(value) && typeof value.path === 'string' && typeof value.content === 'string';
+}
+
+function isScaffoldBlueprint(value: unknown): value is ScaffoldBlueprint {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.name) &&
+    isPackageType(value.type) &&
+    isStringRecord(value.defaultDependencies) &&
+    isStringRecord(value.defaultDevDependencies) &&
+    Array.isArray(value.files) &&
+    value.files.every(isScaffoldBlueprintFile) &&
+    isStringRecord(value.scripts)
+  );
+}
+
+function isWorkspaceFilterState(value: unknown): value is WorkspaceFilterState {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.searchQuery === 'string' &&
+    Array.isArray(value.types) &&
+    value.types.every(isPackageType) &&
+    Array.isArray(value.tags) &&
+    value.tags.every((tag): tag is string => typeof tag === 'string') &&
+    (value.statusFilter === 'all' || isTaskStatus(value.statusFilter))
+  );
+}
+
+/**
+ * Validates an untrusted payload (typically from `localStorage` or a user
+ * supplied snapshot file) and returns a fully typed, prototype-clean state, or
+ * `null` when the payload is malformed or built against an incompatible schema
+ * version. Callers treat `null` as "fall back to seed data".
+ */
+export function validateStorageSnapshot(data: unknown): MonorepoStorageState | null {
+  const clean = stripPollution(data);
+  if (!isRecord(clean)) return null;
+
+  if (clean.version !== STORAGE_VERSION) return null;
+  if (!Array.isArray(clean.packages) || !clean.packages.every(isWorkspacePackage)) return null;
+  if (!Array.isArray(clean.pipelineRuns) || !clean.pipelineRuns.every(isPipelineRun)) return null;
+  if (!Array.isArray(clean.scaffoldBlueprints) || !clean.scaffoldBlueprints.every(isScaffoldBlueprint)) {
+    return null;
+  }
+  if (!isWorkspaceFilterState(clean.persistedFilters)) return null;
+  if (typeof clean.updatedAt !== 'string') return null;
+  if (clean.activeWorkspaceId !== null && typeof clean.activeWorkspaceId !== 'string') return null;
+
+  // Package ids must be unique, otherwise the DAG and graph builders key on
+  // colliding map entries and silently drop edges.
+  const ids = new Set<string>();
+  for (const pkg of clean.packages) {
+    if (ids.has(pkg.id)) return null;
+    ids.add(pkg.id);
+  }
+
+  return clean as unknown as MonorepoStorageState;
+}
+
 export function loadState(): MonorepoStorageState {
   if (typeof window === 'undefined') {
     return getInitialSeedData();
   }
 
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      const initial = getInitialSeedData();
-      saveStateImmediate(initial);
-      return initial;
-    }
-    const parsed = JSON.parse(raw) as MonorepoStorageState;
-    if (parsed.version !== STORAGE_VERSION || !Array.isArray(parsed.packages)) {
-      const initial = getInitialSeedData();
-      saveStateImmediate(initial);
-      return initial;
-    }
-    return parsed;
-  } catch {
+  const seed = (): MonorepoStorageState => {
     const initial = getInitialSeedData();
     saveStateImmediate(initial);
     return initial;
+  };
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return seed();
+
+    const validated = validateStorageSnapshot(JSON.parse(raw));
+    if (!validated) return seed();
+
+    saveStateImmediate(validated);
+    return validated;
+  } catch {
+    return seed();
   }
 }
 
@@ -221,8 +469,20 @@ export function flushStorage(): void {
   }
 }
 
-if (typeof window !== 'undefined') {
+/** Guards against duplicate listener attachment across module re-evaluation. */
+let unloadListenerAttached = false;
+
+/**
+ * Attaches the tab-close flush hook exactly once. Idempotent so that repeated
+ * module evaluation (HMR, route re-entry) cannot stack duplicate `beforeunload`
+ * handlers on the window.
+ */
+export function installFlushHooks(): void {
+  if (typeof window === 'undefined' || unloadListenerAttached) return;
+  unloadListenerAttached = true;
   window.addEventListener('beforeunload', () => {
     flushStorage();
   });
 }
+
+installFlushHooks();
