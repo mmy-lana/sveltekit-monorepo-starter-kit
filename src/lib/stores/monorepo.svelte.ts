@@ -113,13 +113,13 @@ export const monorepoStore = {
     selectedStatus = val;
     sync();
   },
-  get openModalId() {
+  get openModalId(): string | null {
     return openModalId;
   },
-  get drawerOpen() {
+  get drawerOpen(): boolean {
     return drawerOpen;
   },
-  get pipelineRuns() {
+  get pipelineRuns(): PipelineRun[] {
     return pipelineRuns;
   },
 
@@ -155,7 +155,7 @@ export const monorepoStore = {
    * Selects a workspace and opens the inspector. Passing `null` closes the
    * drawer without discarding the selection.
    */
-  setActiveWorkspace(id: string | null) {
+  setActiveWorkspace(id: string | null): void {
     if (id === null) {
       drawerOpen = false;
       return;
@@ -165,7 +165,7 @@ export const monorepoStore = {
     sync();
   },
 
-  closeDrawer() {
+  closeDrawer(): void {
     drawerOpen = false;
   },
 

@@ -101,12 +101,17 @@
     }
   }
 
+  let isConfirmingDelete = $state(false);
+
   function handleDelete() {
     if (!activePkg) return;
-    if (confirm(`Are you sure you want to delete ${activePkg.name}?`)) {
-      monorepoStore.removePackage(activePkg.id, true);
-      monorepoStore.closeDrawer();
+    if (!isConfirmingDelete) {
+      isConfirmingDelete = true;
+      return;
     }
+    monorepoStore.removePackage(activePkg.id, true);
+    monorepoStore.closeDrawer();
+    isConfirmingDelete = false;
   }
 </script>
 
@@ -218,10 +223,19 @@
       </div>
     </div>
 
-    <div class="pt-6 border-t border-neutral-800">
-      <Button variant="danger" size="md" class="w-full" onclick={handleDelete}>
-        Delete Workspace
-      </Button>
+    <div class="pt-6 border-t border-neutral-800 flex gap-2">
+      {#if isConfirmingDelete}
+        <Button variant="ghost" size="md" class="w-1/2" onclick={() => (isConfirmingDelete = false)}>
+          Cancel
+        </Button>
+        <Button variant="danger" size="md" class="w-1/2" onclick={handleDelete}>
+          Confirm Delete
+        </Button>
+      {:else}
+        <Button variant="danger" size="md" class="w-full" onclick={handleDelete}>
+          Delete Workspace
+        </Button>
+      {/if}
     </div>
   </div>
 {/if}
