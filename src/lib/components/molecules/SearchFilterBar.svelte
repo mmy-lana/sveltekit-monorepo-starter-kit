@@ -1,13 +1,26 @@
 <script lang="ts">
-  import type { PackageType } from '$lib/types';
+  import type { PackageType, TaskStatus } from '$lib/types';
   import { monorepoStore } from '$lib/stores/monorepo.svelte';
   import Input from '$lib/components/ui/Input.svelte';
+  import Select from '$lib/components/ui/Select.svelte';
 
   const types: PackageType[] = ['app', 'lib', 'tool', 'config'];
+
+  const statusOptions = [
+    { label: 'Any status', value: 'all' },
+    { label: 'Success', value: 'success' },
+    { label: 'Cached', value: 'cached' },
+    { label: 'Failure', value: 'failure' },
+    { label: 'Running', value: 'running' },
+    { label: 'Queued', value: 'queued' },
+    { label: 'Idle', value: 'idle' }
+  ];
+
+  let statusValue = $derived(monorepoStore.selectedStatus);
 </script>
 
-<div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full">
-  <div class="flex-1">
+<div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full min-w-0">
+  <div class="flex-1 min-w-0">
     <Input
       bind:value={monorepoStore.searchQuery}
       placeholder="Search packages, tags or dependencies..."
@@ -15,7 +28,17 @@
       onclear={() => (monorepoStore.searchQuery = '')}
     />
   </div>
+
   <div class="flex items-center gap-1.5 flex-wrap">
+    <div class="w-full sm:w-40 shrink-0">
+      <Select
+        options={statusOptions}
+        value={statusValue}
+        ariaLabel="Filter packages by latest build status"
+        onchange={(val) => (monorepoStore.selectedStatus = val as TaskStatus | 'all')}
+      />
+    </div>
+
     {#each types as t}
       <button
         type="button"

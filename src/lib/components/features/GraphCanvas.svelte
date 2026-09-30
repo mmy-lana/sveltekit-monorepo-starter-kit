@@ -8,12 +8,32 @@
     y: number;
   }
 
+  interface GraphLayout {
+    coords: Map<string, Point>;
+    width: number;
+    height: number;
+    tiers: number[];
+  }
+
   /** Canonical drawing surface. The viewBox scales this to the element box. */
   const VIEWBOX_WIDTH = 640;
   const VIEWBOX_HEIGHT = 520;
   const MIN_ZOOM = 0.4;
   const MAX_ZOOM = 3;
   const NODE_RADIUS = 22;
+  /** Minimum horizontal breathing room between two nodes on the same tier. */
+  const TIER_NODE_SPACING = 130;
+  /** Vertical distance between consecutive tiers. */
+  const TIER_HEIGHT = 150;
+  const SIDE_PAD = 90;
+  const TIER_PAD = 70;
+  /** Longest label rendered inline before it is elided. */
+  const LABEL_MAX_CHARS = 16;
+
+  function truncateLabel(name: string): string {
+    const bare = name.replace(/^@[^/]+\//, '');
+    return bare.length > LABEL_MAX_CHARS ? `${bare.slice(0, LABEL_MAX_CHARS - 1)}\u2026` : bare;
+  }
 
   let graphData = $derived(buildGraph(monorepoStore.packages));
 
@@ -50,11 +70,6 @@
   function touchDistance(touches: TouchList): number {
     const [a, b] = [touches[0], touches[1]];
     return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-  }
-
-  function touchMidpoint(touches: TouchList): Point {
-    const [a, b] = [touches[0], touches[1]];
-    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
   }
 
   function handleTouchStart(e: TouchEvent) {
@@ -156,45 +171,57 @@
   }
 
   /**
-   * Layered radial layout: nodes are grouped by topological depth onto
-   * concentric rings so that dependency edges generally flow inward, which
-   * keeps the graph legible without a full force simulation.
+   * Layered topological layout (Sugiyama-style tiers, no crossing heuristics).
+   *
+   * Nodes are bucketed by topological depth. Depth 0 holds roots (no internal
+   * dependencies) and each subsequent tier is one level further downstream, so
+   * every dependency edge points strictly downward. Within a tier, nodes are
+   * spread with even spacing at `x = (width / (n + 1)) * (i + 1)`, which is
+   * guaranteed collision-free for any bucket size because consecutive indices
+   * are always separated by `width / (n + 1) > 0`.
+   *
+   * The earlier ring-based implementation computed a radius of 0 for the root
+   * tier and centred every single-node bucket, so unrelated nodes collapsed
+   * onto identical coordinates.
    */
-  let nodeCoords = $derived.by(() => {
-    const map = new Map<string, Point>();
+  let layout = $derived.by((): GraphLayout => {
     const nodes = graphData.nodes;
-    if (nodes.length === 0) return map;
-
-    const byDepth = new Map<number, typeof nodes>();
-    for (const node of nodes) {
-      const bucket = byDepth.get(node.depth);
-      if (bucket) bucket.push(node);
-      else byDepth.set(node.depth, [node]);
+    if (nodes.length === 0) {
+      return { coords: new Map(), width: VIEWBOX_WIDTH, height: VIEWBOX_HEIGHT, tiers: [] };
     }
 
-    const maxDepth = Math.max(0, ...nodes.map((n) => n.depth));
-    const cx = VIEWBOX_WIDTH / 2;
-    const cy = VIEWBOX_HEIGHT / 2;
-    const outerRadius = Math.min(cx, cy) - 80;
-    const ringSpan = maxDepth === 0 ? 0 : outerRadius / (maxDepth + 1);
+    const tiers = new Map<number, string[]>();
+    for (const node of nodes) {
+      const bucket = tiers.get(node.depth);
+      if (bucket) bucket.push(node.id);
+      else tiers.set(node.depth, [node.id]);
+    }
 
-    for (const [depth, bucket] of byDepth) {
-      const radius = maxDepth === 0 ? 0 : depth * ringSpan + (depth === 0 ? 0 : 40);
-      bucket.forEach((node, index) => {
-        if (bucket.length === 1) {
-          map.set(node.id, { x: cx, y: cy });
-          return;
-        }
-        const angle = (index / bucket.length) * 2 * Math.PI - Math.PI / 2;
-        map.set(node.id, {
-          x: cx + radius * Math.cos(angle),
-          y: cy + radius * Math.sin(angle)
+    const depths = [...tiers.keys()].sort((a, b) => a - b);
+    const widest = Math.max(...depths.map((d) => tiers.get(d)?.length ?? 0));
+
+    // Grow the drawing surface so wide/deep graphs never squeeze nodes together.
+    const width = Math.max(VIEWBOX_WIDTH, widest * TIER_NODE_SPACING + SIDE_PAD * 2);
+    const height = Math.max(VIEWBOX_HEIGHT, depths.length * TIER_HEIGHT + TIER_PAD * 2);
+
+    const coords = new Map<string, Point>();
+
+    depths.forEach((depth, tierIndex) => {
+      const bucket = tiers.get(depth) ?? [];
+      const y = TIER_PAD + tierIndex * ((height - TIER_PAD * 2) / Math.max(1, depths.length - 1));
+
+      bucket.forEach((id, index) => {
+        coords.set(id, {
+          x: (width / (bucket.length + 1)) * (index + 1),
+          y
         });
       });
-    }
+    });
 
-    return map;
+    return { coords, width, height, tiers: depths };
   });
+
+  let nodeCoords = $derived(layout.coords);
 </script>
 
 {#if graphData.nodes.length === 0}
@@ -263,8 +290,9 @@
     <div class="absolute top-3 right-3 z-10 flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-lg p-1">
       <button
         type="button"
+        disabled={zoom >= MAX_ZOOM}
         onclick={() => handleZoomBy(0.2)}
-        class="w-11 h-11 flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800 rounded"
+        class="w-11 h-11 flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800 rounded disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-neutral-300"
         aria-label="Zoom in"
         title="Zoom In"
       >
@@ -272,8 +300,9 @@
       </button>
       <button
         type="button"
+        disabled={zoom <= MIN_ZOOM}
         onclick={() => handleZoomBy(-0.2)}
-        class="w-11 h-11 flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800 rounded"
+        class="w-11 h-11 flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800 rounded disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-neutral-300"
         aria-label="Zoom out"
         title="Zoom Out"
       >
@@ -291,7 +320,7 @@
 
     <svg
       class="w-full h-full relative"
-      viewBox="0 0 {VIEWBOX_WIDTH} {VIEWBOX_HEIGHT}"
+      viewBox="0 0 {layout.width} {layout.height}"
       preserveAspectRatio="xMidYMid meet"
       role="img"
       aria-label="Dependency edges between workspace packages"
@@ -320,6 +349,7 @@
             <!-- 44x44 minimum hit target: transparent padding behind the glyph. -->
             <g
               transform="translate({pos.x}, {pos.y})"
+              data-testid="graph-node"
               role="button"
               tabindex="0"
               aria-label="Open {node.name} workspace details"
@@ -340,7 +370,8 @@
                 text-anchor="middle"
                 class="fill-neutral-300 font-mono text-[11px] pointer-events-none select-none"
               >
-                {node.name.replace(/^@[^/]+\//, '')}
+                <title>{node.name}</title>
+                {truncateLabel(node.name)}
               </text>
             </g>
           {/if}

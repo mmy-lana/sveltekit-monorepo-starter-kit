@@ -36,7 +36,7 @@
   ];
 </script>
 
-<div class="min-h-screen bg-[#hud-bg] text-neutral-100 flex flex-col font-sans overflow-x-hidden">
+<div class="min-h-screen bg-[var(--color-hud-bg)] text-neutral-100 flex flex-col font-sans overflow-x-hidden">
   <header class="border-b border-neutral-800 bg-[#0d0d11]/80 backdrop-blur-md sticky top-0 z-30 px-4 py-2.5">
     <div class="max-w-7xl mx-auto flex items-center justify-between gap-2 flex-wrap">
       <div class="flex items-center gap-3 min-w-0">

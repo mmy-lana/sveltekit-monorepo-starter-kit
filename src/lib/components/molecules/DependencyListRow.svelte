@@ -31,8 +31,14 @@
   </div>
 
   {#if onunlink}
-    <Button variant="ghost" size="sm" onclick={onunlink} class="text-red-400 hover:text-red-300 min-h-[32px] min-w-[32px]">
-      ✕
+    <Button
+      variant="ghost"
+      size="sm"
+      onclick={onunlink}
+      ariaLabel={`Unlink dependency ${dependency.name}`}
+      class="text-red-400 hover:text-red-300 min-h-[32px] min-w-[32px]"
+    >
+      &#10005;
     </Button>
   {/if}
 </div>

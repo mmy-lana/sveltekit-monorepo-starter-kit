@@ -178,6 +178,9 @@ let debounceTimeout: ReturnType<typeof setTimeout> | null = null;
 /** Keys that can be used to poison an object's prototype chain. */
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+/** Upper bound on a workspace path, guarding against absurd or abusive input. */
+const MAX_PATH_LENGTH = 180;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -295,22 +298,48 @@ function isWorkspacePackage(value: unknown): value is WorkspacePackage {
   return true;
 }
 
-/** A single path segment: no separators and no relative markers. */
+/**
+ * Characters that are meaningful to a shell, a template engine or a URL
+ * parser. None are ever valid inside a workspace path segment, so they are
+ * rejected outright rather than escaped.
+ */
+const SHELL_META = /[&;|`$<>()"'\\\s]/;
+
+/** Schemes that can execute or exfiltrate when a path is resolved by a loader. */
+const DANGEROUS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/** Segment charset: lowercase alphanumerics, hyphen, underscore. Nothing else. */
+const SAFE_SEGMENT = /^[a-z0-9][a-z0-9_-]*$/;
+
+/** A single path segment: strict charset, no separators, no relative markers. */
 function isSafePathSegment(segment: string): boolean {
-  if (!segment || segment.length === 0) return false;
+  if (typeof segment !== 'string') return false;
+  if (segment.length === 0) return false;
+  // Dot-only segments enable traversal, and a leading dot hides files.
   if (segment === '.' || segment === '..' || segment === '~') return false;
+  if (segment.startsWith('.')) return false;
   if (segment.includes('/') || segment.includes('\\')) return false;
-  if (segment.toLowerCase().includes('%2e')) return false;
-  return true;
+  if (DANGEROUS_SCHEME.test(segment)) return false;
+  if (SHELL_META.test(segment)) return false;
+  if (/%/.test(segment)) return false;
+  return SAFE_SEGMENT.test(segment);
 }
 
 /** A relative POSIX path made only of safe segments. */
 function isSafePath(path: string): boolean {
-  if (!path) return false;
+  if (typeof path !== 'string' || path.length === 0) return false;
+  // Rejects absolute POSIX paths, UNC paths and Windows drive letters.
   if (path.startsWith('/') || path.startsWith('\\')) return false;
   if (path.includes('\\')) return false;
   if (/^[a-zA-Z]:/.test(path)) return false;
-  return path.split('/').every((segment) => isSafePathSegment(segment));
+  // Rejects javascript:, data:, file:, http:, vbscript: and any other scheme.
+  if (DANGEROUS_SCHEME.test(path)) return false;
+  if (SHELL_META.test(path)) return false;
+  if (/%/.test(path)) return false;
+  if (path.length > MAX_PATH_LENGTH) return false;
+
+  const segments = path.split('/');
+  return segments.length > 0 && segments.every((segment) => isSafePathSegment(segment));
 }
 
 function isPipelineStep(value: unknown): boolean {

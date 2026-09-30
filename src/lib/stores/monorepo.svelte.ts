@@ -8,7 +8,7 @@ import {
   validateStorageSnapshot
 } from '$lib/storage/localStorageManager';
 import { wouldCreateCycle } from '$lib/utils/dag';
-import { validatePackageName, validateSemVer } from '$lib/utils/scaffold';
+import { slugify, validatePackageName, validateSemVer } from '$lib/utils/scaffold';
 
 /**
  * Returns `activeWorkspaceId` only when it still resolves against `registry`.
@@ -21,6 +21,22 @@ function resolveActiveWorkspace(
 ): string | null {
   if (!activeWorkspaceId) return null;
   return registry.some((pkg) => pkg.id === activeWorkspaceId) ? activeWorkspaceId : null;
+}
+
+/**
+ * Status of the most recent pipeline run that included `workspaceId`, or `null`
+ * if the workspace has never been part of a run.
+ *
+ * `pipelineRuns` is ordered newest-first, so the first run containing the
+ * workspace is authoritative. This deliberately ignores historical runs: a
+ * workspace that failed once and succeeded later reports the success.
+ */
+export function getLatestRunStatus(workspaceId: string): TaskStatus | null {
+  for (const run of pipelineRuns) {
+    const step = run.steps.find((s) => s.workspaceId === workspaceId);
+    if (step) return step.status;
+  }
+  return null;
 }
 
 const initial = loadState();
@@ -154,15 +170,6 @@ export const monorepoStore = {
   },
 
   filteredPackages(): WorkspacePackage[] {
-    const runByWorkspace = new Map<string, TaskStatus>();
-    for (const run of pipelineRuns) {
-      for (const step of run.steps) {
-        if (!runByWorkspace.has(step.workspaceId)) {
-          runByWorkspace.set(step.workspaceId, step.status);
-        }
-      }
-    }
-
     const query = searchQuery.trim().toLowerCase();
 
     return packages.filter((pkg) => {
@@ -174,18 +181,23 @@ export const monorepoStore = {
 
       const matchType = selectedTypes.length === 0 || selectedTypes.includes(pkg.type);
 
+      // Derived strictly from the newest run that touched this workspace, so a
+      // later success clears a failure from any earlier run.
       const matchStatus =
-        selectedStatus === 'all' || runByWorkspace.get(pkg.id) === selectedStatus;
+        selectedStatus === 'all' || getLatestRunStatus(pkg.id) === selectedStatus;
 
       return matchSearch && matchType && matchStatus;
     });
   },
 
   addPackage(newPkg: WorkspacePackage): { success: boolean; error?: string } {
-    let slug = newPkg.slug;
+    // Re-derive the slug so the registry invariant (safe, unique path segment)
+    // holds no matter who constructed the package object.
+    const baseSlug = slugify(newPkg.slug || newPkg.name);
+    let slug = baseSlug;
     let counter = 1;
     while (packages.some((p) => p.slug === slug)) {
-      slug = `${newPkg.slug}-${counter}`;
+      slug = `${baseSlug}-${counter}`;
       counter++;
     }
 
@@ -316,7 +328,8 @@ export const monorepoStore = {
   },
 
   updatePackage(packageId: string, patch: Partial<Pick<WorkspacePackage, 'name' | 'description' | 'type' | 'tags'>>): { success: boolean; error?: string } {
-    if (!packages.some((p) => p.id === packageId)) {
+    const target = packages.find((p) => p.id === packageId);
+    if (!target) {
       return { success: false, error: 'Package not found.' };
     }
 
@@ -327,8 +340,36 @@ export const monorepoStore = {
       }
     }
 
+    // A rename must carry its derived metadata with it, otherwise the slug and
+    // the on-disk path would keep pointing at the old name forever.
+    const nextType = patch.type ?? target.type;
+    let derived: Pick<WorkspacePackage, 'slug' | 'path'> | null = null;
+
+    if (patch.name !== undefined && patch.name !== target.name) {
+      const baseSlug = slugify(patch.name);
+      let slug = baseSlug;
+      let counter = 1;
+      while (packages.some((p) => p.id !== packageId && p.slug === slug)) {
+        slug = `${baseSlug}-${counter}`;
+        counter += 1;
+      }
+      derived = {
+        slug,
+        path: `${nextType === 'app' ? 'apps' : 'packages'}/${slug}`
+      };
+    } else if (patch.type !== undefined && patch.type !== target.type) {
+      // Moving between apps/* and packages/* keeps the slug but re-homes the path.
+      const base = target.slug;
+      derived = {
+        slug: base,
+        path: `${nextType === 'app' ? 'apps' : 'packages'}/${base}`
+      };
+    }
+
     packages = packages.map((p) =>
-      p.id === packageId ? { ...p, ...patch, updatedAt: new Date().toISOString() } : p
+      p.id === packageId
+        ? { ...p, ...patch, ...derived, updatedAt: new Date().toISOString() }
+        : p
     );
     sync();
     return { success: true };

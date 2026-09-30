@@ -1,4 +1,4 @@
-import type { PipelineRun, PipelineStep, TaskStatus, WorkspacePackage } from '$lib/types';
+import type { PipelineRun, PipelineStep, WorkspacePackage } from '$lib/types';
 import { monorepoStore } from '$lib/stores/monorepo.svelte';
 import { getTopologicalOrder } from '$lib/utils/dag';
 
@@ -28,6 +28,31 @@ function buildInitialLogs(): string[] {
 }
 
 let terminalLogs = $state<string[]>(buildInitialLogs());
+
+/**
+ * Hard ceiling on the in-memory terminal buffer. A long session appends two
+ * lines per step plus a start line; without a bound the array grows without
+ * limit and every re-render walks the whole history.
+ */
+const MAX_TERMINAL_LINES = 500;
+
+export interface RunOptions {
+  /**
+   * Opt-in failure injection for exercising the failure path in the UI and in
+   * tests. Off by default: a normal build must not fail at random.
+   */
+  simulateFailures?: boolean;
+}
+
+/** Appends a line, evicting the oldest once the buffer is full (ring buffer). */
+function pushLog(line: string): void {
+  const stamp = `[${new Date().toLocaleTimeString()}] ${line}`;
+  if (terminalLogs.length >= MAX_TERMINAL_LINES) {
+    terminalLogs = [...terminalLogs.slice(terminalLogs.length - MAX_TERMINAL_LINES + 1), stamp];
+    return;
+  }
+  terminalLogs = [...terminalLogs, stamp];
+}
 
 /**
  * Cache key for a workspace: its own `updatedAt` combined with the `updatedAt`
@@ -92,7 +117,7 @@ export const pipelineStore = {
   },
 
   appendLog(line: string) {
-    terminalLogs = [...terminalLogs, `[${new Date().toLocaleTimeString()}] ${line}`];
+    pushLog(line);
   },
 
   resetRuns() {
@@ -102,7 +127,13 @@ export const pipelineStore = {
     monorepoStore.syncPipelineRuns([]);
   },
 
-  async runPipeline(command: 'build' | 'test' | 'lint') {
+  /**
+   * Runs a pipeline. Steps succeed unless the graph is cyclic or the caller
+   * explicitly opts into simulated failures, so a standard run is reliable.
+   * Pass `{ simulateFailures: true }` to exercise the failure UI.
+   */
+  async runPipeline(command: 'build' | 'test' | 'lint', options?: RunOptions) {
+    const simulateFailures = options?.simulateFailures ?? false;
     if (isExecuting) return;
 
     const packages = monorepoStore.packages;
@@ -259,10 +290,11 @@ export const pipelineStore = {
           const simulatedMs = seededDuration(`${runId}:${step.workspaceId}`, 180, 620);
           await new Promise((resolve) => setTimeout(resolve, simulatedMs));
 
-          // Deterministic failure injection: a hash of the run + workspace id.
-          // Reproducible for a given run id, so the simulation is stable and
-          // testable rather than an unseeded coin flip.
-          const fails = seededDuration(`${runId}:${step.workspaceId}:fail`, 0, 99) < 12;
+          // Failures are opt-in. A standard pipeline run is deterministic and
+          // only reports failure when explicitly asked to simulate one, so the
+          // dashboard never shows a random red build the user cannot act on.
+          const fails =
+            simulateFailures && seededDuration(`${runId}:${step.workspaceId}:fail`, 0, 99) < 12;
 
           step.durationMs = simulatedMs;
           step.completedAt = new Date().toISOString();
@@ -305,12 +337,3 @@ export const pipelineStore = {
     );
   }
 };
-
-/** Latest known status for a workspace, used by package cards. */
-export function getLatestRunStatus(workspaceId: string): TaskStatus | null {
-  for (const run of runs) {
-    const step = run.steps.find((s) => s.workspaceId === workspaceId);
-    if (step) return step.status;
-  }
-  return null;
-}

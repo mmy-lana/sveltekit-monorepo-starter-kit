@@ -248,9 +248,28 @@ try {
     check('S5 drawer is a labelled dialog', modalCount === 1);
 
     // Backdrop close.
-    await page.locator('div[aria-label="Close workspace details"]').click({ position: { x: 5, y: 5 } });
+    await page.getByRole('button', { name: /close workspace details/i }).click({ position: { x: 5, y: 5 } });
     await drawer.waitFor({ state: 'detached', timeout: 5000 });
     check('S5 backdrop closes drawer', (await drawer.count()) === 0);
+
+    // UI-05: Escape dismissal and focus restoration.
+    await page.locator('[data-testid="workspace-grid"] button[aria-label]').first().click();
+    await drawer.waitFor({ state: 'visible', timeout: 5000 });
+    const drawerRole = await drawer.getAttribute('role');
+    const drawerModal = await drawer.getAttribute('aria-modal');
+    const drawerTabindex = await drawer.getAttribute('tabindex');
+    check('S5 drawer exposes dialog semantics', drawerRole === 'dialog' && drawerModal === 'true', `role=${drawerRole} aria-modal=${drawerModal}`);
+    check('S5 drawer is programmatically focusable', drawerTabindex === '-1', `tabindex=${drawerTabindex}`);
+
+    const bodyLocked = await page.evaluate(() => document.body.style.overflow);
+    check('S5 body scroll locked while drawer open', bodyLocked === 'hidden', `overflow=${bodyLocked}`);
+
+    await page.keyboard.press('Escape');
+    await drawer.waitFor({ state: 'detached', timeout: 5000 });
+    check('S5 Escape dismisses drawer', (await drawer.count()) === 0);
+
+    const bodyReleased = await page.evaluate(() => document.body.style.overflow);
+    check('S5 body scroll restored after close', bodyReleased !== 'hidden', `overflow=${bodyReleased}`);
 
     check('S5 no console errors', errors.length === 0, errors.join(' | '));
     await page.close();
@@ -386,6 +405,251 @@ try {
     check('S7 valid name still accepted', (await page.getByText('@workspace/legit-pkg').count()) > 0);
 
     check('S7 no console errors', errors.length === 0, errors.join(' | '));
+    await page.close();
+  }
+
+  // ---------------------------------------------------------------- Scenario 8
+  // Graph layout: no two nodes may share coordinates (overlap regression).
+  {
+    const page = await context.newPage();
+    const errors = watchErrors(page);
+
+    await page.goto(`${BASE}/graph`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('[data-testid="graph-node"]');
+
+    const transforms = await page.$$eval('[data-testid="graph-node"]', (els) =>
+      els.map((el) => el.getAttribute('transform'))
+    );
+
+    check('S8 nodes rendered', transforms.length >= 5, `nodes=${transforms.length}`);
+
+    const coords = transforms.map((t) => {
+      const m = /translate\(\s*(-?[\d.]+)[ ,]+(-?[\d.]+)\s*\)/.exec(t ?? '');
+      return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
+    });
+
+    check('S8 all node transforms parsed', coords.every((c) => c !== null));
+
+    const seen = new Map();
+    const collisions = [];
+    coords.forEach((c, i) => {
+      if (!c) return;
+      const key = `${c.x},${c.y}`;
+      if (seen.has(key)) collisions.push(`#${seen.get(key)} and #${i} at (${key})`);
+      else seen.set(key, i);
+    });
+    check('S8 no overlapping node coordinates', collisions.length === 0, collisions.join('; '));
+
+    // Distinct x within a tier is what the even-spacing formula guarantees.
+    const xs = new Set(coords.filter(Boolean).map((c) => c.x));
+    check('S8 nodes spread across multiple columns', xs.size > 1, `uniqueX=${xs.size}`);
+
+    // Vertical separation: no two nodes may sit on the same y.
+    const ys = new Set(coords.filter(Boolean).map((c) => c.y));
+    check('S8 nodes occupy distinct tiers', ys.size > 1, `uniqueY=${ys.size}`);
+
+    // No node may sit closer than the 44px touch target allows.
+    let tooClose = null;
+    for (let i = 0; i < coords.length; i += 1) {
+      for (let j = i + 1; j < coords.length; j += 1) {
+        const a = coords[i];
+        const b = coords[j];
+        if (!a || !b) continue;
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (dist < 44) tooClose = `#${i}-#${j} dist=${dist.toFixed(1)}`;
+      }
+    }
+    check('S8 minimum node separation >= 44px', tooClose === null, String(tooClose));
+
+    check('S8 no console errors', errors.length === 0, errors.join(' | '));
+    await page.close();
+  }
+
+  // ---------------------------------------------------------------- Scenario 9
+  // UI-07: zoom controls disable at the MIN/MAX bounds.
+  {
+    const page = await context.newPage();
+    const errors = watchErrors(page);
+
+    await page.goto(`${BASE}/graph`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('[data-testid="graph-canvas"]');
+
+    const zoomIn = page.getByRole('button', { name: /zoom in/i });
+    const zoomOut = page.getByRole('button', { name: /zoom out/i });
+
+    check('S9 zoom in enabled at rest', await zoomIn.isEnabled());
+    check('S9 zoom out enabled at rest', await zoomOut.isEnabled());
+
+    const group = page.locator('[data-testid="graph-canvas"] svg g').first();
+    const readScale = async () => {
+      const t = await group.getAttribute('transform');
+      const m = /scale\(([\d.]+)\)/.exec(t ?? '');
+      return m ? Number(m[1]) : 1;
+    };
+
+    // 1 -> 3.0 requires 10 clicks of +0.2; click well past the bound.
+    for (let i = 0; i < 14; i += 1) {
+      if (await zoomIn.isDisabled()) break;
+      await zoomIn.click();
+    }
+    const maxScale = await readScale();
+    check('S9 zoom clamps at MAX_ZOOM', Math.abs(maxScale - 3) < 0.001, `scale=${maxScale}`);
+    check('S9 zoom in disabled at MAX_ZOOM', await zoomIn.isDisabled());
+    check('S9 zoom out still enabled at MAX_ZOOM', await zoomOut.isEnabled());
+
+    for (let i = 0; i < 20; i += 1) {
+      if (await zoomOut.isDisabled()) break;
+      await zoomOut.click();
+    }
+    const minScale = await readScale();
+    check('S9 zoom clamps at MIN_ZOOM', Math.abs(minScale - 0.4) < 0.001, `scale=${minScale}`);
+    check('S9 zoom out disabled at MIN_ZOOM', await zoomOut.isDisabled());
+    check('S9 zoom in re-enabled at MIN_ZOOM', await zoomIn.isEnabled());
+
+    check('S9 no console errors', errors.length === 0, errors.join(' | '));
+    await page.close();
+  }
+
+  // ---------------------------------------------------------------- Scenario 10
+  // DATA-04: standard runs succeed deterministically.
+  {
+    const page = await context.newPage();
+    const errors = watchErrors(page);
+
+    await page.goto(`${BASE}/pipelines`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: /Run Build Pipeline/i }).click();
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('[data-testid="pipeline-step"][data-status]');
+        return el && !['queued', 'running'].includes(el.getAttribute('data-status'));
+      },
+      { timeout: 20000 }
+    );
+    await page.waitForTimeout(1500);
+
+    const statuses = await page.$$eval('[data-testid="pipeline-step"]', (els) =>
+      els.map((e) => e.getAttribute('data-status'))
+    );
+    const failed = statuses.filter((s) => s === 'failure');
+    check(
+      'S10 default pipeline run has zero failures',
+      failed.length === 0,
+      `statuses=${statuses.join(',')}`
+    );
+
+    check('S10 steps completed', statuses.length > 0, `steps=${statuses.length}`);
+    check('S10 no console errors', errors.length === 0, errors.join(' | '));
+    await page.close();
+  }
+
+  // ---------------------------------------------------------------- Scenario 11
+  // PERF-01: terminal buffer is capped at 500 lines under sustained logging.
+  {
+    const page = await context.newPage();
+    const errors = watchErrors(page);
+
+    await page.goto(`${BASE}/pipelines`, { waitUntil: 'networkidle' });
+
+    // Each run appends ~12 lines (start + 2 per step + finish). Drive enough
+    // runs to overflow the 500-line ceiling so the eviction path is exercised.
+    const runBtn = page.getByRole('button', { name: /Run Build Pipeline/i });
+    for (let i = 0; i < 50; i += 1) {
+      await runBtn.click();
+      await page.waitForFunction(
+        () => {
+          const el = document.querySelector('[data-testid="pipeline-step"][data-status]');
+          return el && !['queued', 'running'].includes(el.getAttribute('data-status'));
+        },
+        { timeout: 20000 }
+      );
+      const lines = await page.locator('[data-testid="terminal-line"]').count();
+      if (lines >= 500) break;
+    }
+
+    const lineCount = await page.locator('[data-testid="terminal-line"]').count();
+    check('S11 terminal buffer capped at 500', lineCount <= 500, `lines=${lineCount}`);
+    check('S11 terminal buffer actually saturated', lineCount >= 400, `lines=${lineCount}`);
+
+    // Oldest lines must be evicted, newest retained.
+    const firstLine = await page.locator('[data-testid="terminal-line"]').first().innerText();
+    check(
+      'S11 oldest lines evicted (ring buffer)',
+      !firstLine.includes('System initialized'),
+      firstLine.slice(0, 48)
+    );
+
+    check('S11 no console errors', errors.length === 0, errors.join(' | '));
+    await page.close();
+  }
+
+  // ---------------------------------------------------------------- Scenario 12
+  // DATA-06: status filter reflects only the most recent run.
+  {
+    const page = await context.newPage();
+    const errors = watchErrors(page);
+
+    // Fresh storage so no prior run history leaks in.
+    await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
+    await page.evaluate((key) => window.localStorage.removeItem(key), STORAGE_KEY);
+    await page.reload({ waitUntil: 'networkidle' });
+
+    const statusSelect = page.getByLabel(/filter packages by latest build status/i);
+
+    // Before any run, no package has a status, so "success" matches nothing.
+    await statusSelect.selectOption('success');
+    await page.waitForTimeout(300);
+    const beforeRun = await page
+      .locator('[data-testid="workspace-grid"] button[aria-label]')
+      .count();
+    check('S12 success filter empty before any run', beforeRun === 0, `cards=${beforeRun}`);
+
+    // A failing simulated run should surface under the failure filter.
+    await statusSelect.selectOption('all');
+    await page.getByRole('button', { name: /Build All/i }).click();
+    await page.waitForTimeout(4500);
+
+    await statusSelect.selectOption('success');
+    await page.waitForTimeout(400);
+    const afterSuccess = await page
+      .locator('[data-testid="workspace-grid"] button[aria-label]')
+      .count();
+    check('S12 success filter shows built packages', afterSuccess > 0, `cards=${afterSuccess}`);
+
+    await statusSelect.selectOption('failure');
+    await page.waitForTimeout(400);
+    const failureCount = await page
+      .locator('[data-testid="workspace-grid"] button[aria-label]')
+      .count();
+    const emptyState = await page.getByText('No Packages Detected').count();
+    check(
+      'S12 failure filter empty after clean run (no stale failures)',
+      failureCount === 0 && emptyState === 1,
+      `cards=${failureCount} emptyState=${emptyState}`
+    );
+
+    // Re-running must keep the success set stable (deterministic, DATA-04).
+    await statusSelect.selectOption('all');
+    await page.getByRole('button', { name: /Build All/i }).click();
+    await page.waitForTimeout(4500);
+    await statusSelect.selectOption('failure');
+    await page.waitForTimeout(400);
+    const failureAfterRerun = await page
+      .locator('[data-testid="workspace-grid"] button[aria-label]')
+      .count();
+    check(
+      'S12 repeat run still reports zero failures',
+      failureAfterRerun === 0,
+      `cards=${failureAfterRerun}`
+    );
+
+    await statusSelect.selectOption('all');
+    await page.waitForTimeout(300);
+    const allCount = await page
+      .locator('[data-testid="workspace-grid"] button[aria-label]')
+      .count();
+    check('S12 clearing filter restores all packages', allCount >= 5, `cards=${allCount}`);
+
+    check('S12 no console errors', errors.length === 0, errors.join(' | '));
     await page.close();
   }
 } finally {

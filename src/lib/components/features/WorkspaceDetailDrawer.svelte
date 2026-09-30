@@ -16,6 +16,79 @@
 
   let selectedLinkTarget = $state('');
   let linkError = $state<string | null>(null);
+  let drawerEl = $state<HTMLDivElement | undefined>();
+  let previouslyFocused: HTMLElement | null = null;
+
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  function focusable(): HTMLElement[] {
+    if (!drawerEl) return [];
+    return Array.from(drawerEl.querySelectorAll<HTMLElement>(FOCUSABLE));
+  }
+
+  // Focus trap, body scroll lock and focus restore. Every listener and inline
+  // style touched here is released on teardown, so unmounting the drawer leaves
+  // nothing dangling on the document.
+  $effect(() => {
+    if (!activePkg) return;
+
+    previouslyFocused = document.activeElement as HTMLElement | null;
+
+    const { body } = document;
+    const previousOverflow = body.style.overflow;
+    const previousPaddingRight = body.style.paddingRight;
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+    body.style.overflow = 'hidden';
+    if (scrollbarWidth > 0) body.style.paddingRight = `${scrollbarWidth}px`;
+
+    const focusFrame = requestAnimationFrame(() => {
+      const [first] = focusable();
+      (first ?? drawerEl)?.focus();
+    });
+
+    const handleKeydown = (e: KeyboardEvent) => {
+      if (!activePkg) return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        monorepoStore.closeDrawer();
+        return;
+      }
+
+      if (e.key !== 'Tab') return;
+
+      const nodes = focusable();
+      if (nodes.length === 0) {
+        e.preventDefault();
+        drawerEl?.focus();
+        return;
+      }
+
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+
+      if (e.shiftKey && (active === first || active === drawerEl)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeydown, true);
+
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', handleKeydown, true);
+      body.style.overflow = previousOverflow;
+      body.style.paddingRight = previousPaddingRight;
+      previouslyFocused?.focus?.();
+      previouslyFocused = null;
+    };
+  });
 
   function handleAddLink() {
     if (!activePkg || !selectedLinkTarget) return;
@@ -38,24 +111,22 @@
 </script>
 
 {#if activePkg}
-  <div
-    class="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs"
-    role="button"
-    tabindex="0"
+  <!-- Backdrop doubles as the click-outside close control. Escape is handled by
+       the document-level trap below, so this stays a plain button. -->
+  <button
+    type="button"
+    class="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs cursor-default"
     aria-label="Close workspace details"
     onclick={() => monorepoStore.closeDrawer()}
-    onkeydown={(e) => {
-      if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
-        monorepoStore.closeDrawer();
-      }
-    }}
-  ></div>
+  ></button>
 
   <!-- Bottom sheet below 1024px, right-docked drawer from 1024px up. -->
   <div
+    bind:this={drawerEl}
     role="dialog"
     aria-modal="true"
     aria-label="Workspace details for {activePkg.name}"
+    tabindex="-1"
     data-testid="workspace-drawer"
     class="fixed z-50 bg-neutral-900 border-neutral-800 p-5 sm:p-6 flex flex-col overflow-y-auto shadow-2xl
            inset-x-0 bottom-0 max-h-[88vh] rounded-t-2xl border-t

@@ -76,17 +76,33 @@ export function validateSemVer(version: string): { valid: boolean; error?: strin
   return { valid: true };
 }
 
+/**
+ * Reduces a package name to a single safe workspace path segment: lowercase
+ * alphanumerics, hyphens and underscores only. Matches the `SAFE_SEGMENT`
+ * charset enforced by the storage validator, so a generated slug can never be
+ * rejected on reload.
+ */
+export function slugify(name: string): string {
+  const bare = name
+    .replace(/^@[^/]+\//, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '');
+
+  return bare || 'workspace';
+}
+
 export function generateScaffoldPackage(
   name: string,
   type: PackageType,
   description: string,
   version: string = '0.0.1'
 ): WorkspacePackage {
-  const rawSlug = name.replace(/^@[^/]+\//, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
   // Defence in depth: the slug is interpolated into a workspace path, so it is
   // collapsed to a single safe path segment even if the caller skipped
   // `validatePackageName`.
-  const cleanSlug = rawSlug.replace(/-+/g, '-').replace(/^-+|-+$/g, '') || 'workspace';
+  const cleanSlug = slugify(name);
   const folder = type === 'app' ? 'apps' : 'packages';
   const timestamp = new Date().toISOString();
 
