@@ -7,17 +7,18 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsgo --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "latest",
     "@sveltejs/kit": "latest",
     "@sveltejs/vite-plugin-svelte": "latest",
     "@tailwindcss/vite": "latest",
+    "@typescript/native": "npm:typescript@latest",
     "svelte": "latest",
     "svelte-check": "latest",
     "tailwindcss": "latest",
-    "typescript": "latest",
+    "typescript": "~6",
     "vite": "latest"
   }
 }
